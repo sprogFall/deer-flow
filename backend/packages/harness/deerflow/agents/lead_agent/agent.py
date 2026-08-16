@@ -657,94 +657,106 @@ def _load_enabled_available_skills(available_skills: set[str] | None, *, app_con
 
 
 def make_lead_agent(config: RunnableConfig):
-    """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
+    """LangGraph 图工厂；保持签名与 LangGraph Server 兼容。"""
+    # 合并 legacy configurable 选项与 LangGraph runtime context，得到统一的运行时配置字典
     runtime_config = _get_runtime_config(config)
+    # 从运行时配置中取出 app_config；若调用方（如直接走 LangGraph Server）未注入则回退到全局配置
     runtime_app_config = runtime_config.get("app_config")
     if not isinstance(runtime_app_config, AppConfig):
         runtime_app_config = get_app_config()
-    # Mode selection precedence, pinned by test_checkpoint_mode.py:
-    # - First freeze: the app config owns the process mode; a client-supplied
-    #   configurable key is ignored so a direct LangGraph request cannot
-    #   reconfigure (or crash) a fresh process.
-    # - Once frozen: an internally injected key (run worker / gateway) or the
-    #   app config must match the frozen mode; ``freeze_checkpoint_channel_mode``
-    #   fails closed on any mismatch, so neither a forged key nor a config.yaml
-    #   change can silently reconfigure the process.
+
+    # 检查点通道模式的选型优先级（由 test_checkpoint_mode.py 固定）：
+    # - 首次冻结：进程模式由 app config 决定；客户端直接提供的 configurable key 会被忽略，
+    #   防止一次直接的 LangGraph 请求重新配置（或搞崩）一个全新的进程。
+    # - 已冻结后：只有内部注入的 key（run worker / gateway）或 app config 与已冻结模式一致才
+    #   能通过；``freeze_checkpoint_channel_mode`` 在任何不匹配时都会 fail-closed，
+    #   因此伪造的 key 或 config.yaml 改动都无法在运行中悄悄切换进程模式。
     frozen_mode = frozen_checkpoint_channel_mode()
     if frozen_mode is None:
+        # 进程尚未冻结模式：以 app config 的配置为准
         requested_mode = runtime_app_config.database.checkpoint_channel_mode
     else:
+        # 进程已冻结：优先采用内部注入的 key，否则使用 app config 中的模式
         requested_mode = (config.get("configurable", {}) or {}).get(
             INTERNAL_CHECKPOINT_MODE_KEY,
             runtime_app_config.database.checkpoint_channel_mode,
         )
+    # 冻结模式：首次调用记录当前模式，后续调用校验一致性（不匹配则报错）
     mode = freeze_checkpoint_channel_mode(requested_mode)
-    # The snapshot cadence travels with the mode: restart-required, frozen
-    # from the app config, and deliberately not client-injectable (a forged
-    # configurable key must not recompile the channel table either).
+
+    # 快照频率随模式一起冻结：重启后生效、只来自 app config，且刻意不允许客户端注入
+    # （伪造的 configurable key 同样不能重新编译通道表）。
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
+    # 将最终确定的检查点模式写回 config，供后续建图（状态 schema 选择等）使用
     inject_checkpoint_mode(config, mode)
     return _make_lead_agent(config, app_config=runtime_app_config)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
-    # Lazy import to avoid circular dependency
+    # 延迟导入以避免循环依赖
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 
+    # 合并 legacy configurable 选项与 LangGraph runtime context，得到统一的运行时配置
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+    # 读取（由 make_lead_agent 冻结并注入的）检查点通道模式，用于后续选择状态 schema
     mode = (config.get("configurable", {}) or {}).get(
         INTERNAL_CHECKPOINT_MODE_KEY,
         resolved_app_config.database.checkpoint_channel_mode,
     )
 
-    # Resolve one authoritative identity for every user-scoped factory input.
-    # Agent Server's reserved auth fields win over ordinary client-supplied
-    # context/configurable values; the embedded Gateway path uses context.user_id.
+    # 解析出一个权威的用户身份，供所有按用户维度构建的输入使用。
+    # Agent Server 的保留认证字段优先于客户端普通提供的 context/configurable 值；
+    # 内嵌的 Gateway 路径则使用 context.user_id。
     from deerflow.runtime.user_context import resolve_config_user_id
 
     resolved_user_id = resolve_config_user_id(config)
 
+    # —— 从运行时配置中读取本次运行的各种选项（均带默认值）——
+    # 请求中指定的模型名（model_name 或 model），可能为 None
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
-    is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-    max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
-    is_bootstrap = cfg.get("is_bootstrap", False)
-    non_interactive = bool(cfg.get("non_interactive", False))
-    agent_name = validate_agent_name(cfg.get("agent_name"))
+    is_plan_mode = cfg.get("is_plan_mode", False)          # 是否启用计划模式（TodoList）
+    subagent_enabled = cfg.get("subagent_enabled", False)  # 是否启用子代理
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)  # 最大并行子代理数
+    max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))  # 单次运行子代理总数上限
+    is_bootstrap = cfg.get("is_bootstrap", False)          # 是否为引导（创建自定义 agent 的专用流程）模式
+    non_interactive = bool(cfg.get("non_interactive", False))  # 非交互模式：调度任务等无用户可回答的场景
+    agent_name = validate_agent_name(cfg.get("agent_name"))  # 自定义 agent 名称（None 表示默认 agent）
 
+    # 非 bootstrap 时加载自定义 agent 的配置；bootstrap 模式下没有 agent 配置
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    # 确定本次运行可见的技能集合：bootstrap 只暴露最小集合，普通 agent 用其配置中列出的技能
     available_skills = _available_skill_names(agent_config, is_bootstrap)
-    # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
+    # 自定义 agent 在配置中声明的模型（若有），否则为 None，让 _resolve_model_name 选默认模型
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # thinking / reasoning precedence: request > custom agent default > runtime
-    # default (issue #4336). See ``_resolve_runtime_option`` for the falsy-vs-unset
-    # handling.
+    # thinking / reasoning 的优先级：请求 > 自定义 agent 默认值 > 运行时默认值（issue #4336）。
+    # 见 ``_resolve_runtime_option`` 中对「显式传 falsy 值」与「未传」两种情况的区分处理。
     agent_thinking = getattr(agent_config, "thinking_enabled", None) if agent_config else None
     agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
     thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
     reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
 
-    # Per-agent sampling overrides (temperature / max_tokens) layered on top of
-    # the resolved model profile (issue #4336). None when the agent set none.
+    # 每个 agent 专属的采样参数覆盖（temperature / max_tokens），叠加在解析后的模型配置之上
+    # （issue #4336）。agent 未设置时为 None。
     agent_model_settings = getattr(agent_config, "model_settings", None) if agent_config else None
     agent_model_overrides = agent_model_settings.model_dump(exclude_none=True) if agent_model_settings else None
 
-    # Final model name resolution: request → agent config → global default, with fallback for unknown names
+    # 最终模型名解析：请求 → agent 配置 → 全局默认值；未知名称自动回退到默认模型
     model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
 
-    # Phase 3: enforce model:use authorization. On deny, fall back to the first
-    # allowed model (graceful) rather than crashing the run (RFC §9).
+    # 对解析出的模型名执行 model:use 授权检查。被拒绝时优雅回退到第一个被允许的模型，
+    # 而不是让本次运行直接失败（RFC §9）。
     model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
 
+    # 取得最终模型的配置对象（能力、参数等）
     model_config = resolved_app_config.get_model_config(model_name)
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+    # 若请求了 thinking 模式但模型不支持，降级为非 thinking 模式并告警
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
@@ -761,7 +773,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         max_total_subagents,
     )
 
-    # Inject run metadata for LangSmith trace tagging
+    # 向 config 注入本次运行元数据，用于 LangSmith 等平台的 trace 打标
     if "metadata" not in config:
         config["metadata"] = {}
 
@@ -778,12 +790,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         }
     )
 
-    # Inject tracing callbacks at the graph invocation root so a single LangGraph
-    # run produces one trace with all node / LLM / tool calls as child spans,
-    # AND so the Langfuse handler sees ``on_chain_start(parent_run_id=None)`` and
-    # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
-    # ``config["metadata"]`` onto the trace. Without root-level attachment the
-    # model is a nested observation and the handler strips ``langfuse_*`` keys.
+    # 在图的调用根上挂载追踪回调（Langfuse / LangSmith）：这样一次 LangGraph 运行只会产生
+    # 一条 trace，所有节点 / LLM / 工具调用都作为它的子 span；
+    # 同时 Langfuse handler 才能看到 ``on_chain_start(parent_run_id=None)``，从而把
+    # ``langfuse_session_id`` / ``langfuse_user_id`` 从 ``config["metadata"]`` 传播到 trace 上。
+    # 若不在根上挂载，模型只是嵌套 observation，handler 会丢弃 ``langfuse_*`` 键。
     tracing_callbacks = build_tracing_callbacks()
     if tracing_callbacks:
         existing = config.get("callbacks") or []
@@ -791,35 +802,40 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
+    # 加载当前作用域下「启用且可用」的技能对象列表（受 available_skills 白名单约束）
     enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
-    # Build skill search setup (deferred skill discovery).
-    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
+    # 构建技能搜索配置（延迟技能发现）。
+    # 由 skills.deferred_discovery 控制——与 tool_search.enabled 相互独立。
     from deerflow.skills.describe import build_skill_search_setup
 
     skill_search_enabled = resolved_app_config.skills.deferred_discovery
     container_base_path = resolved_app_config.skills.container_path
 
+    # —— bootstrap 分支：首次创建自定义 agent 时使用的精简引导 agent ——
     if is_bootstrap:
-        # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        # Keep the bootstrap skill set intentionally narrow so agent creation
-        # remains deterministic before the custom agent's own config exists.
+        # 引导 agent 使用最小化提示词：刻意收窄技能集合，让自定义 agent 配置
+        # 尚未存在时，agent 创建流程保持确定可控。
         bootstrap_skills = [s for s in enabled_skills if s.name in _BOOTSTRAP_SKILL_NAMES]
         skill_setup = build_skill_search_setup(
             bootstrap_skills,
             enabled=skill_search_enabled,
             container_base_path=container_base_path,
         )
+        # 基础工具集 = 全部可用工具 + setup_agent（引导流程专用：创建自定义 agent）
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         configured_tools = raw_tools
+        # 非交互模式下剔除需要用户回答的工具（如 ask_clarification）
         if non_interactive:
             configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        # 收集全部待授权工具（配置工具 + 技能描述工具 + 记忆工具）
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
             authorization_candidates.append(skill_setup.describe_skill_tool)
         if should_use_memory_tools(resolved_app_config.memory):
             _append_memory_tools_without_name_conflicts(authorization_candidates)
         configured_tool_ids = {id(tool) for tool in configured_tools}
+        # 对候选工具做统一授权过滤，按对象身份区分配置工具与授权追加的延迟工具
         authorized_tools, _authz_provider = apply_tool_authorization(
             authorization_candidates,
             context=cfg,
@@ -827,13 +843,21 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         )
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+        # 将部分工具改为延迟注册（tool_search 开启时），并追加授权阶段新增的工具
         final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
         final_tools.extend(late_tools)
+        # 构建 MCP 路由中间件：在延迟过滤前自动提升被命中的 MCP 工具 schema
         mcp_routing_middleware = build_mcp_routing_middleware(
             final_tools,
             setup,
             top_k=resolved_app_config.tool_search.auto_promote_top_k,
         )
+        # 组装最终的 LangGraph agent：
+        # - model：解析出的聊天模型（attach_tracing=False，追踪已由根回调统一处理）
+        # - tools：最终工具集
+        # - middleware：构建完整中间件链，并按检查点模式归一化状态 schema
+        # - system_prompt：应用提示词模板（含技能搜索等动态段）
+        # - state_schema：按检查点模式选择线程状态 schema
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -874,33 +898,34 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         enabled=skill_search_enabled,
         container_base_path=container_base_path,
     )
+
+    # —— 默认 / 自定义 agent 分支 ——
+    # 对 webhook 渠道（目前仅 ``github``）触发的运行隐藏 ``update_agent`` 工具。
+    # webhook 提示词来自任意外部评论者——任何能在已配置仓库发帖并输入 ``@<bot>``
+    # 的人都满足触发条件。暴露该工具会让评论者借机修改 agent 的 ``tool_groups`` /
+    # ``SOUL.md`` / ``model``，且改动会持久化到之后的每次运行。自我修改只应发生在
+    # 受信任的操作者界面上（聊天 UI、HTTP API），而不该出现在 webhook 扇出路径中。
     #
-    # Withhold ``update_agent`` from runs triggered by webhook channels
-    # (currently only ``github``). Webhook prompts come from arbitrary
-    # external commenters — anyone who can post on a configured repo and
-    # types ``@<bot>`` clears the trigger gate. Exposing the tool there
-    # gives that commenter a path to mutate the agent's ``tool_groups``
-    # / ``SOUL.md`` / ``model``, and the change persists for every
-    # subsequent run. Self-mutation belongs in operator-trusted surfaces
-    # (the chat UI, the HTTP API), not in webhook fan-out.
-    #
-    # The channel name is plumbed into ``run_context`` by
-    # ``ChannelManager._resolve_run_params``; bootstrap and direct invocations
-    # leave it unset, so ``update_agent`` remains available there.
+    # 渠道名由 ``ChannelManager._resolve_run_params`` 写入 ``run_context``；
+    # bootstrap 和直接调用不设置渠道名，因此那里 ``update_agent`` 仍然可用。
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
+    # 自定义 agent 额外获得 update_agent 工具（可更新自己的 SOUL.md / 配置）；默认 agent 没有
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
-    # Default lead agent (unchanged behavior)
+    # 默认 lead agent（保持原有行为）：按 agent 配置的 tool_groups 过滤可用工具
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     configured_tools = raw_tools + extra_tools
+    # 非交互模式下剔除需要用户回答的工具（如 ask_clarification）
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    # 收集全部待授权工具（配置工具 + 技能描述工具 + 记忆工具）
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:
         authorization_candidates.append(skill_setup.describe_skill_tool)
     if should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(authorization_candidates)
     configured_tool_ids = {id(tool) for tool in configured_tools}
+    # 对候选工具做统一授权过滤，按对象身份区分配置工具与授权追加的延迟工具
     authorized_tools, _authz_provider = apply_tool_authorization(
         authorization_candidates,
         context=cfg,
@@ -908,14 +933,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     )
     configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
     late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+    # 将部分工具改为延迟注册（tool_search 开启时），并追加授权阶段新增的工具
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
     final_tools.extend(late_tools)
+    # 构建 MCP 路由中间件：在延迟过滤前自动提升被命中的 MCP 工具 schema
     mcp_routing_middleware = build_mcp_routing_middleware(
         final_tools,
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
+    # 生成 MCP 路由提示段，注入系统提示词，指导模型在需要时主动调用延迟工具
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
+    # 组装最终的 LangGraph agent（与 bootstrap 分支结构一致，多了 reasoning_effort /
+    # model_overrides / agent_name / mcp_routing_hints_section 等自定义参数）
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
         tools=final_tools,

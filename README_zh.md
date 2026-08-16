@@ -105,7 +105,6 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    git clone https://github.com/bytedance/deer-flow.git
    cd deer-flow
    ```
-
 2. **运行安装向导（推荐）**
 
    在项目根目录（`deer-flow/`）执行：
@@ -128,9 +127,9 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    检查一遍。
 
    > **进阶 / 手动配置**：如果你更想直接编辑 `config.yaml`，可以改用 `make config` 复制完整的示例模板。完整参考见 `config.example.yaml`，其中包含 CLI-backed provider（Codex CLI、Claude Code OAuth）、OpenRouter、Responses API 等更多配置。
+   >
 
-   <details>
-   <summary>手动模型配置示例</summary>
+   span
 
    ```yaml
    models:
@@ -217,11 +216,12 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 可以先按下面的资源档位来选择 DeerFlow 的运行方式：
 
-| 部署场景 | 起步配置 | 推荐配置 | 说明 |
-|---------|-----------|------------|-------|
-| 本地体验 / `make dev` | 4 vCPU、8 GB 内存、20 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 适合单个开发者或单个轻量会话，且模型走外部 API。`2 核 / 4 GB` 通常跑不稳。 |
-| Docker 开发 / `make docker-start` | 4 vCPU、8 GB 内存、25 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 镜像构建、源码挂载和 sandbox 容器都会比纯本地模式更吃资源。 |
-| 长期运行服务 / `make up` | 8 vCPU、16 GB 内存、40 GB SSD 可用空间 | 16 vCPU、32 GB 内存 | 更适合共享环境、多 agent 任务、报告生成或更重的 sandbox 负载。 |
+
+| 部署场景                         | 起步配置                               | 推荐配置            | 说明                                                                       |
+| -------------------------------- | -------------------------------------- | ------------------- | -------------------------------------------------------------------------- |
+| 本地体验 /`make dev`             | 4 vCPU、8 GB 内存、20 GB SSD 可用空间  | 8 vCPU、16 GB 内存  | 适合单个开发者或单个轻量会话，且模型走外部 API。`2 核 / 4 GB` 通常跑不稳。 |
+| Docker 开发 /`make docker-start` | 4 vCPU、8 GB 内存、25 GB SSD 可用空间  | 8 vCPU、16 GB 内存  | 镜像构建、源码挂载和 sandbox 容器都会比纯本地模式更吃资源。                |
+| 长期运行服务 /`make up`          | 8 vCPU、16 GB 内存、40 GB SSD 可用空间 | 16 vCPU、32 GB 内存 | 更适合共享环境、多 agent 任务、报告生成或更重的 sandbox 负载。             |
 
 - 上面的配置只覆盖 DeerFlow 本身；如果你还要本机部署本地大模型，请单独为模型服务预留资源。
 - 持续运行的服务更推荐使用 Linux + Docker。macOS 和 Windows 更适合作为开发机或体验环境。
@@ -260,32 +260,34 @@ make down   # 停止并移除容器
 在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
+
    ```bash
    make check  # 校验 Node.js 22+、pnpm、uv、nginx
    ```
-
 2. **安装依赖**：
+
    ```bash
    make install  # 安装 backend + frontend 依赖
    ```
-
 3. **（可选）预拉取 sandbox 镜像**：
+
    ```bash
    # 如果使用 Docker / Container sandbox，建议先执行
    make setup-sandbox
    ```
-
 4. **启动服务**：
+
    ```bash
    make dev
    ```
-
 5. **访问地址**：http://localhost:2026
 
 ### 进阶配置
+
 #### Sandbox 模式
 
 DeerFlow 支持多种 sandbox 执行方式：
+
 - **本地执行**（直接在宿主机上运行 sandbox 代码）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
@@ -306,14 +308,15 @@ DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应�
 
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat 或 WeCom。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
-| 渠道 | 传输方式 | 上手难度 |
-|---------|-----------|------------|
-| Telegram | Bot API（long-polling） | 简单 |
-| Slack | Socket Mode | 中等 |
-| Feishu / Lark | WebSocket | 中等 |
-| WeChat | Tencent iLink（long-polling） | 中等 |
-| 企业微信智能机器人 | WebSocket | 中等 |
-| 钉钉 | Stream Push（WebSocket） | 中等 |
+
+| 渠道               | 传输方式                      | 上手难度 |
+| ------------------ | ----------------------------- | -------- |
+| Telegram           | Bot API（long-polling）       | 简单     |
+| Slack              | Socket Mode                   | 中等     |
+| Feishu / Lark      | WebSocket                     | 中等     |
+| WeChat             | Tencent iLink（long-polling） | 中等     |
+| 企业微信智能机器人 | WebSocket                     | 中等     |
+| 钉钉               | Stream Push（WebSocket）      | 中等     |
 
 **`config.yaml` 中的配置示例：**
 
@@ -393,6 +396,7 @@ channels:
 ```
 
 说明：
+
 - `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。
 - 如果 `assistant_id` 填的是自定义 agent 名，DeerFlow 仍然会走 `lead_agent`，同时把该值注入为 `agent_name`，这样 IM 渠道也会生效对应 agent 的 SOUL 和配置。
 
@@ -471,13 +475,14 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 渠道连接完成后，你可以直接在聊天窗口里和 DeerFlow 交互：
 
-| 命令 | 说明 |
-|---------|-------------|
-| `/new` | 开启新对话 |
+
+| 命令      | 说明                 |
+| --------- | -------------------- |
+| `/new`    | 开启新对话           |
 | `/status` | 查看当前 thread 信息 |
-| `/models` | 列出可用模型 |
-| `/memory` | 查看 memory |
-| `/help` | 查看帮助 |
+| `/models` | 列出可用模型         |
+| `/memory` | 查看 memory          |
+| `/help`   | 查看帮助             |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
 
@@ -583,6 +588,7 @@ npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
 然后确认 DeerFlow 已经启动（默认地址是 `http://localhost:2026`），在 Claude Code 里使用 `/claude-to-deerflow` 命令即可。
 
 **你可以做的事情包括：**
+
 - 给 DeerFlow 发送消息，并接收流式响应
 - 选择执行模式：flash（更快）、standard、pro（规划模式）、ultra（sub-agents 模式）
 - 检查 DeerFlow 健康状态，列出 models / skills / agents
